@@ -219,6 +219,7 @@ export type Database = {
           id: string
           is_premium: boolean | null
           last_name: string | null
+          premium_expires_at: string | null
           reputation: number | null
           show_avatar: boolean
           show_name: boolean
@@ -237,6 +238,7 @@ export type Database = {
           id?: string
           is_premium?: boolean | null
           last_name?: string | null
+          premium_expires_at?: string | null
           reputation?: number | null
           show_avatar?: boolean
           show_name?: boolean
@@ -255,6 +257,7 @@ export type Database = {
           id?: string
           is_premium?: boolean | null
           last_name?: string | null
+          premium_expires_at?: string | null
           reputation?: number | null
           show_avatar?: boolean
           show_name?: boolean
