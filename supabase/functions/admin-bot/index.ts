@@ -6,12 +6,14 @@ const corsHeaders = {
 };
 
 const ADMIN_BOT_TOKEN = Deno.env.get('ADMIN_BOT_TOKEN')!;
-const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN')!; // For notifying users
+const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN')!;
 const TELEGRAM_ADMIN_CHAT_ID = Deno.env.get('TELEGRAM_ADMIN_CHAT_ID')!;
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+const USERS_PER_PAGE = 10;
 
 // Send message via Admin Bot
 async function sendAdminMessage(chatId: string | number, text: string, options: any = {}) {
@@ -22,6 +24,25 @@ async function sendAdminMessage(chatId: string | number, text: string, options: 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       chat_id: chatId,
+      text,
+      parse_mode: 'HTML',
+      ...options,
+    }),
+  });
+  
+  return response.json();
+}
+
+// Edit message
+async function editAdminMessage(chatId: string | number, messageId: number, text: string, options: any = {}) {
+  const url = `https://api.telegram.org/bot${ADMIN_BOT_TOKEN}/editMessageText`;
+  
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      message_id: messageId,
       text,
       parse_mode: 'HTML',
       ...options,
@@ -94,6 +115,8 @@ async function handleStart(chatId: number, userId: number) {
 <b>Доступные команды:</b>
 
 📊 /stats — Статистика проекта
+👥 /users — Список пользователей
+👑 /premium — Управление подписками
 📝 /pending — Статьи на модерации
 ❓ /questions — Вопросы в поддержку
 📢 /broadcast — Рассылка всем пользователям
@@ -115,6 +138,12 @@ async function handleStats(chatId: number, userId: number) {
     .from('profiles')
     .select('*', { count: 'exact', head: true });
 
+  // Get premium user count
+  const { count: premiumCount } = await supabase
+    .from('profiles')
+    .select('*', { count: 'exact', head: true })
+    .eq('is_premium', true);
+
   // Get article counts by status
   const { data: articles } = await supabase
     .from('articles')
@@ -130,6 +159,7 @@ async function handleStats(chatId: number, userId: number) {
   const message = `📊 <b>Статистика BoysHub</b>
 
 👥 <b>Пользователей:</b> ${userCount || 0}
+👑 <b>Premium:</b> ${premiumCount || 0}
 
 📝 <b>Статьи:</b>
 ├ Всего: ${stats.total}
@@ -137,7 +167,297 @@ async function handleStats(chatId: number, userId: number) {
 ├ ✅ Опубликовано: ${stats.approved}
 └ ❌ Отклонено: ${stats.rejected}`;
 
+  const keyboard = {
+    inline_keyboard: [
+      [{ text: '👥 Открыть список пользователей', callback_data: 'users:0' }],
+    ],
+  };
+
+  await sendAdminMessage(chatId, message, { reply_markup: keyboard });
+}
+
+// Handle /users command - list users with pagination
+async function handleUsers(chatId: number, userId: number, page: number = 0, messageId?: number) {
+  if (!isAdmin(userId)) return;
+
+  const from = page * USERS_PER_PAGE;
+  
+  // Get total count
+  const { count: totalCount } = await supabase
+    .from('profiles')
+    .select('*', { count: 'exact', head: true });
+
+  // Get users for current page
+  const { data: users, error } = await supabase
+    .from('profiles')
+    .select('id, telegram_id, username, first_name, last_name, is_premium, reputation, created_at')
+    .order('created_at', { ascending: false })
+    .range(from, from + USERS_PER_PAGE - 1);
+
+  if (error) {
+    console.error('Error fetching users:', error);
+    await sendAdminMessage(chatId, '❌ Ошибка при загрузке пользователей');
+    return;
+  }
+
+  const totalPages = Math.ceil((totalCount || 0) / USERS_PER_PAGE);
+
+  let message = `👥 <b>Пользователи</b> (${totalCount || 0})\n`;
+  message += `📄 Страница ${page + 1}/${totalPages || 1}\n\n`;
+
+  if (!users || users.length === 0) {
+    message += '<i>Пользователей нет</i>';
+  } else {
+    for (const user of users) {
+      const premium = user.is_premium ? '👑' : '';
+      const name = user.first_name || 'Без имени';
+      const username = user.username ? `@${user.username}` : '';
+      message += `${premium} <b>${name}</b> ${username}\n`;
+      message += `   🆔 ${user.telegram_id || 'N/A'} | ⭐ ${user.reputation || 0}\n`;
+    }
+  }
+
+  message += `\n🔍 Для поиска: <code>/search username</code> или <code>/search ID</code>`;
+
+  // Pagination buttons
+  const buttons: any[] = [];
+  if (page > 0) {
+    buttons.push({ text: '⬅️ Назад', callback_data: `users:${page - 1}` });
+  }
+  if (page < totalPages - 1) {
+    buttons.push({ text: 'Вперёд ➡️', callback_data: `users:${page + 1}` });
+  }
+
+  const keyboard = {
+    inline_keyboard: buttons.length > 0 ? [buttons] : [],
+  };
+
+  if (messageId) {
+    await editAdminMessage(chatId, messageId, message, { reply_markup: keyboard });
+  } else {
+    await sendAdminMessage(chatId, message, { reply_markup: keyboard });
+  }
+}
+
+// Handle /search command
+async function handleSearch(chatId: number, userId: number, query: string) {
+  if (!isAdmin(userId)) return;
+
+  if (!query) {
+    await sendAdminMessage(chatId, `🔍 <b>Поиск пользователей</b>
+
+Используйте:
+<code>/search username</code> — поиск по юзернейму
+<code>/search 123456789</code> — поиск по Telegram ID`);
+    return;
+  }
+
+  // Try to find by telegram_id or username
+  let users;
+  const isNumeric = /^\d+$/.test(query);
+
+  if (isNumeric) {
+    const { data } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('telegram_id', parseInt(query));
+    users = data;
+  } else {
+    const { data } = await supabase
+      .from('profiles')
+      .select('*')
+      .ilike('username', `%${query}%`);
+    users = data;
+  }
+
+  if (!users || users.length === 0) {
+    await sendAdminMessage(chatId, `🔍 Пользователь "<b>${query}</b>" не найден`);
+    return;
+  }
+
+  for (const user of users) {
+    const premium = user.is_premium ? '👑 Premium' : '👤 Обычный';
+    const premiumExpiry = user.premium_expires_at 
+      ? `\n📅 Premium до: ${new Date(user.premium_expires_at).toLocaleDateString('ru-RU')}`
+      : '';
+
+    const message = `👤 <b>Профиль пользователя</b>
+
+📛 <b>Имя:</b> ${user.first_name || ''} ${user.last_name || ''}
+🔗 <b>Username:</b> ${user.username ? `@${user.username}` : 'Не указан'}
+🆔 <b>Telegram ID:</b> ${user.telegram_id}
+⭐ <b>Репутация:</b> ${user.reputation || 0}
+📊 <b>Статус:</b> ${premium}${premiumExpiry}
+📅 <b>Регистрация:</b> ${new Date(user.created_at).toLocaleDateString('ru-RU')}`;
+
+    const keyboard = {
+      inline_keyboard: [
+        user.is_premium 
+          ? [{ text: '❌ Забрать Premium', callback_data: `premium_revoke:${user.telegram_id}` }]
+          : [{ text: '👑 Выдать Premium', callback_data: `premium_grant:${user.telegram_id}` }],
+        [{ text: '📅 Продлить на 30 дней', callback_data: `premium_extend:${user.telegram_id}` }],
+      ],
+    };
+
+    await sendAdminMessage(chatId, message, { reply_markup: keyboard });
+  }
+}
+
+// Handle /premium command
+async function handlePremium(chatId: number, userId: number) {
+  if (!isAdmin(userId)) return;
+
+  const { count: premiumCount } = await supabase
+    .from('profiles')
+    .select('*', { count: 'exact', head: true })
+    .eq('is_premium', true);
+
+  const { data: premiumUsers } = await supabase
+    .from('profiles')
+    .select('telegram_id, username, first_name, premium_expires_at')
+    .eq('is_premium', true)
+    .order('premium_expires_at', { ascending: true })
+    .limit(10);
+
+  let message = `👑 <b>Управление Premium</b>
+
+Всего Premium пользователей: <b>${premiumCount || 0}</b>
+
+<b>Команды:</b>
+• /search [username/ID] — найти пользователя
+• Нажмите кнопку на карточке пользователя
+
+<b>Premium пользователи:</b>\n`;
+
+  if (premiumUsers && premiumUsers.length > 0) {
+    for (const user of premiumUsers) {
+      const name = user.first_name || 'Без имени';
+      const username = user.username ? `@${user.username}` : '';
+      const expiry = user.premium_expires_at 
+        ? new Date(user.premium_expires_at).toLocaleDateString('ru-RU')
+        : '∞';
+      message += `\n👑 <b>${name}</b> ${username}\n   📅 До: ${expiry}\n`;
+    }
+  } else {
+    message += '\n<i>Пока нет Premium пользователей</i>';
+  }
+
   await sendAdminMessage(chatId, message);
+}
+
+// Handle premium grant
+async function handlePremiumGrant(callbackQuery: any, telegramId: string) {
+  const { id, message } = callbackQuery;
+
+  const expiresAt = new Date();
+  expiresAt.setDate(expiresAt.getDate() + 30);
+
+  const { error } = await supabase
+    .from('profiles')
+    .update({ 
+      is_premium: true,
+      premium_expires_at: expiresAt.toISOString()
+    })
+    .eq('telegram_id', parseInt(telegramId));
+
+  if (error) {
+    console.error('Error granting premium:', error);
+    await answerCallbackQuery(id, '❌ Ошибка');
+    return;
+  }
+
+  // Notify user
+  await sendUserMessage(telegramId, `🎉 <b>Поздравляем!</b>
+
+Вам выдана Premium подписка на 30 дней!
+
+Теперь вам доступны:
+👑 Продажа продуктов через профиль
+📱 Соц сети в профиле  
+🤖 ИИ ассистент
+📚 Премиум материалы
+♾ Безлимит публикаций
+✨ PRO значок
+
+Подписка активна до: ${expiresAt.toLocaleDateString('ru-RU')}`);
+
+  await answerCallbackQuery(id, '✅ Premium выдан');
+  await editMessageReplyMarkup(message.chat.id, message.message_id);
+  await sendAdminMessage(message.chat.id, `✅ Premium выдан пользователю ${telegramId} до ${expiresAt.toLocaleDateString('ru-RU')}`);
+}
+
+// Handle premium revoke
+async function handlePremiumRevoke(callbackQuery: any, telegramId: string) {
+  const { id, message } = callbackQuery;
+
+  const { error } = await supabase
+    .from('profiles')
+    .update({ 
+      is_premium: false,
+      premium_expires_at: null
+    })
+    .eq('telegram_id', parseInt(telegramId));
+
+  if (error) {
+    console.error('Error revoking premium:', error);
+    await answerCallbackQuery(id, '❌ Ошибка');
+    return;
+  }
+
+  // Notify user
+  await sendUserMessage(telegramId, `ℹ️ <b>Уведомление</b>
+
+Ваша Premium подписка была отменена.
+
+Вы можете приобрести её снова в приложении BoysHub.`);
+
+  await answerCallbackQuery(id, '✅ Premium отозван');
+  await editMessageReplyMarkup(message.chat.id, message.message_id);
+  await sendAdminMessage(message.chat.id, `❌ Premium отозван у пользователя ${telegramId}`);
+}
+
+// Handle premium extend
+async function handlePremiumExtend(callbackQuery: any, telegramId: string) {
+  const { id, message } = callbackQuery;
+
+  // Get current expiry
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('premium_expires_at, is_premium')
+    .eq('telegram_id', parseInt(telegramId))
+    .maybeSingle();
+
+  let newExpiry: Date;
+  if (profile?.premium_expires_at && new Date(profile.premium_expires_at) > new Date()) {
+    newExpiry = new Date(profile.premium_expires_at);
+  } else {
+    newExpiry = new Date();
+  }
+  newExpiry.setDate(newExpiry.getDate() + 30);
+
+  const { error } = await supabase
+    .from('profiles')
+    .update({ 
+      is_premium: true,
+      premium_expires_at: newExpiry.toISOString()
+    })
+    .eq('telegram_id', parseInt(telegramId));
+
+  if (error) {
+    console.error('Error extending premium:', error);
+    await answerCallbackQuery(id, '❌ Ошибка');
+    return;
+  }
+
+  // Notify user
+  await sendUserMessage(telegramId, `🎉 <b>Premium продлён!</b>
+
+Ваша подписка продлена на 30 дней.
+Новая дата окончания: ${newExpiry.toLocaleDateString('ru-RU')}`);
+
+  await answerCallbackQuery(id, '✅ Premium продлён');
+  await editMessageReplyMarkup(message.chat.id, message.message_id);
+  await sendAdminMessage(message.chat.id, `✅ Premium продлён для ${telegramId} до ${newExpiry.toLocaleDateString('ru-RU')}`);
 }
 
 // Handle /pending command - show pending articles
@@ -164,7 +484,6 @@ async function handlePending(chatId: number, userId: number) {
 
   await sendAdminMessage(chatId, `📝 <b>Статьи на модерации (${articles.length}):</b>\n\nНажмите на статью для модерации:`);
 
-// Send each article with buttons
   for (const article of articles) {
     const shortId = await getOrCreateShortId(article.id);
     const authorData = article.author as any;
@@ -206,7 +525,6 @@ async function handleBroadcast(chatId: number, userId: number, text?: string) {
     return;
   }
 
-  // Get all users with telegram_id
   const { data: users, error } = await supabase
     .from('profiles')
     .select('telegram_id')
@@ -275,7 +593,6 @@ async function handleQuestions(chatId: number, userId: number) {
   await sendAdminMessage(chatId, `❓ <b>Вопросы в поддержку (${questions.length}):</b>\n\n<i>Чтобы ответить на вопрос, используйте функцию "Ответить" (свайп влево) на сообщение с вопросом.</i>`);
 
   for (const q of questions) {
-    // Get user info
     const { data: profile } = await supabase
       .from('profiles')
       .select('first_name, username')
@@ -294,7 +611,6 @@ ${q.question}
 
     const result = await sendAdminMessage(chatId, message);
     
-    // Update admin_message_id for reply tracking
     if (result.ok && result.result?.message_id) {
       await supabase
         .from('support_questions')
@@ -308,7 +624,6 @@ ${q.question}
 async function handleSupportReply(chatId: number, userId: number, text: string, replyToMessageId: number): Promise<boolean> {
   if (!isAdmin(userId)) return false;
 
-  // Find the question by admin_message_id
   const { data: question, error } = await supabase
     .from('support_questions')
     .select('id, user_telegram_id, question')
@@ -320,7 +635,6 @@ async function handleSupportReply(chatId: number, userId: number, text: string, 
     return false;
   }
 
-  // Update question with answer
   await supabase
     .from('support_questions')
     .update({
@@ -331,7 +645,6 @@ async function handleSupportReply(chatId: number, userId: number, text: string, 
     })
     .eq('id', question.id);
 
-  // Send answer to user via User Bot
   await sendUserMessage(
     question.user_telegram_id,
     `💬 <b>Ответ от поддержки BoysHub</b>
@@ -387,7 +700,6 @@ async function handleApprove(callbackQuery: any, shortId: string) {
     return;
   }
 
-  // Update article status
   const { error } = await supabase
     .from('articles')
     .update({ status: 'approved' })
@@ -399,7 +711,6 @@ async function handleApprove(callbackQuery: any, shortId: string) {
     return;
   }
 
-  // Get article info
   const { data: article } = await supabase
     .from('articles')
     .select('title, author:author_id(telegram_id, first_name)')
@@ -408,14 +719,12 @@ async function handleApprove(callbackQuery: any, shortId: string) {
 
   const authorData = article?.author as any;
 
-  // Log moderation action
   await supabase.from('moderation_logs').insert({
     article_id: articleId,
     moderator_telegram_id: from.id,
     action: 'approved',
   });
 
-  // Notify author via User Bot
   if (authorData?.telegram_id) {
     await sendUserMessage(
       authorData.telegram_id,
@@ -442,7 +751,6 @@ async function handleReject(callbackQuery: any, shortId: string) {
     return;
   }
 
-  // Store pending rejection
   await supabase.from('pending_rejections').insert({
     short_id: shortId,
     article_id: articleId,
@@ -456,7 +764,6 @@ async function handleReject(callbackQuery: any, shortId: string) {
 
 // Handle rejection reason text
 async function handleRejectionReason(chatId: number, userId: number, text: string): Promise<boolean> {
-  // Check for pending rejection
   const { data: pending, error } = await supabase
     .from('pending_rejections')
     .select('article_id, short_id')
@@ -469,7 +776,6 @@ async function handleRejectionReason(chatId: number, userId: number, text: strin
     return false;
   }
 
-  // Update article
   const { error: updateError } = await supabase
     .from('articles')
     .update({
@@ -484,7 +790,6 @@ async function handleRejectionReason(chatId: number, userId: number, text: strin
     return true;
   }
 
-  // Get article info
   const { data: article } = await supabase
     .from('articles')
     .select('title, author:author_id(telegram_id, first_name)')
@@ -493,7 +798,6 @@ async function handleRejectionReason(chatId: number, userId: number, text: strin
 
   const authorData = article?.author as any;
 
-  // Log moderation
   await supabase.from('moderation_logs').insert({
     article_id: pending.article_id,
     moderator_telegram_id: userId,
@@ -501,7 +805,6 @@ async function handleRejectionReason(chatId: number, userId: number, text: strin
     reason: text,
   });
 
-  // Notify author via User Bot
   if (authorData?.telegram_id) {
     await sendUserMessage(
       authorData.telegram_id,
@@ -515,7 +818,6 @@ async function handleRejectionReason(chatId: number, userId: number, text: strin
     );
   }
 
-  // Delete pending rejection
   await supabase
     .from('pending_rejections')
     .delete()
@@ -527,7 +829,7 @@ async function handleRejectionReason(chatId: number, userId: number, text: strin
 
 // Handle callback queries
 async function handleCallbackQuery(callbackQuery: any) {
-  const { data, from } = callbackQuery;
+  const { data, from, message } = callbackQuery;
   
   if (!isAdmin(from.id)) {
     await answerCallbackQuery(callbackQuery.id, '⛔ Доступ запрещён');
@@ -535,12 +837,21 @@ async function handleCallbackQuery(callbackQuery: any) {
   }
 
   console.log('Handling callback:', data);
-  const [action, shortId] = data.split(':');
+  const [action, param] = data.split(':');
 
   if (action === 'approve') {
-    await handleApprove(callbackQuery, shortId);
+    await handleApprove(callbackQuery, param);
   } else if (action === 'reject') {
-    await handleReject(callbackQuery, shortId);
+    await handleReject(callbackQuery, param);
+  } else if (action === 'users') {
+    await answerCallbackQuery(callbackQuery.id);
+    await handleUsers(message.chat.id, from.id, parseInt(param), message.message_id);
+  } else if (action === 'premium_grant') {
+    await handlePremiumGrant(callbackQuery, param);
+  } else if (action === 'premium_revoke') {
+    await handlePremiumRevoke(callbackQuery, param);
+  } else if (action === 'premium_extend') {
+    await handlePremiumExtend(callbackQuery, param);
   }
 }
 
@@ -611,6 +922,13 @@ Deno.serve(async (req) => {
         await handleStart(chat.id, from.id);
       } else if (text === '/stats') {
         await handleStats(chat.id, from.id);
+      } else if (text === '/users') {
+        await handleUsers(chat.id, from.id);
+      } else if (text?.startsWith('/search')) {
+        const query = text.replace('/search', '').trim();
+        await handleSearch(chat.id, from.id, query);
+      } else if (text === '/premium') {
+        await handlePremium(chat.id, from.id);
       } else if (text === '/pending') {
         await handlePending(chat.id, from.id);
       } else if (text === '/questions') {

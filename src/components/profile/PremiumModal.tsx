@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { X, Crown, Check, Zap, Shield, Star } from 'lucide-react';
+import { X, Crown, Zap, Share2, Bot, BookOpen, Infinity, BadgeCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
@@ -14,10 +14,12 @@ export function PremiumModal({ isOpen, onClose }: PremiumModalProps) {
   if (!isOpen) return null;
 
   const features = [
-    { icon: Zap, text: 'Безлимитные публикации' },
-    { icon: Shield, text: 'Приоритетная модерация' },
-    { icon: Crown, text: 'PRO значок в профиле' },
-    { icon: Star, text: 'Доступ к эксклюзивному контенту' },
+    { icon: Crown, text: 'Продажа своего продукта', desc: 'Зарабатывай деньги прямо через профиль' },
+    { icon: Share2, text: 'Соц сети в профиле', desc: 'Развивайся как автор и привлекай аудиторию' },
+    { icon: Bot, text: 'ИИ ассистент', desc: 'Ответ на любой вопрос по темам хаба' },
+    { icon: BookOpen, text: 'Премиум материалы', desc: 'Чек-листы, гайды и лимитированная информация' },
+    { icon: Infinity, text: 'Безлимит публикаций', desc: 'Публикуй сколько хочешь в день' },
+    { icon: BadgeCheck, text: 'PRO значок', desc: 'Выделяйся среди других авторов' },
   ];
 
   const plans = {
@@ -74,16 +76,19 @@ export function PremiumModal({ isOpen, onClose }: PremiumModalProps) {
           </div>
 
           {/* Features */}
-          <div className="mb-6 space-y-3">
+          <div className="mb-6 space-y-2">
             {features.map((feature) => (
               <div
                 key={feature.text}
-                className="flex items-center gap-3 rounded-lg bg-secondary/50 p-3"
+                className="flex items-start gap-3 rounded-lg bg-secondary/50 p-3"
               >
-                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-foreground/10">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-foreground/10">
                   <feature.icon className="h-4 w-4" />
                 </div>
-                <span className="text-sm font-medium">{feature.text}</span>
+                <div className="flex flex-col">
+                  <span className="text-sm font-medium">{feature.text}</span>
+                  <span className="text-xs text-muted-foreground">{feature.desc}</span>
+                </div>
               </div>
             ))}
           </div>
