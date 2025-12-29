@@ -62,8 +62,9 @@ async function sendAdminPhoto(chatId: string | number, photoDataUrl: string, cap
 
   const formData = new FormData();
   formData.append('chat_id', String(chatId));
-  // Deno/TS typing quirk: cast to satisfy BlobPart
-  formData.append('photo', new Blob([parsed.bytes as unknown as Uint8Array], { type: parsed.mime }), parsed.filename);
+  // Use ArrayBuffer slice to satisfy BlobPart typing in Deno
+  const arrayBuffer = parsed.bytes.buffer.slice(parsed.bytes.byteOffset, parsed.bytes.byteOffset + parsed.bytes.byteLength) as ArrayBuffer;
+  formData.append('photo', new Blob([arrayBuffer], { type: parsed.mime }), parsed.filename);
   formData.append('caption', caption.slice(0, 900));
   formData.append('parse_mode', 'HTML');
 
